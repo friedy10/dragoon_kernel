@@ -16,6 +16,7 @@
 #include "sleep.h"
 #include "futex.h"
 #include "gui.h"
+#include "smp.h"
 
 /* Linux compat server entry point */
 extern void linux_compat_server(void);
@@ -98,6 +99,10 @@ void kernel_main(void)
     task_create("gui", gui_main);
 
     kprintf("\n[main] kernel initialization complete\n");
+
+    /* Boot secondary CPUs */
+    smp_init(MAX_CPUS);
+
     kprintf("[main] starting scheduler...\n\n");
 
     /* Start scheduler - this does not return */

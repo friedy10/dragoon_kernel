@@ -3,12 +3,14 @@
  *
  * Uses the EL1 virtual timer (CNTV), which fires IRQ 27 (PPI).
  * 10ms tick interval for scheduling.
+ * Each CPU has its own virtual timer (PPI is per-CPU).
  */
 #include "timer.h"
 #include "irq.h"
 #include "printf.h"
 #include "types.h"
 #include "waitqueue.h"
+#include "percpu.h"
 
 /* Virtual timer IRQ (PPI 27, but GIC PPI numbering = 16 + offset) */
 #define TIMER_IRQ 27
@@ -17,19 +19,20 @@ static u64 timer_freq;
 static u64 timer_interval;
 static volatile u64 tick_count;
 
-/* Flag for cooperative reschedule */
-volatile int reschedule_needed;
-
 static void timer_handler(u32 irq)
 {
     (void)irq;
-    tick_count++;
-    reschedule_needed = 1;
 
-    /* Check wait queue timeouts */
-    wq_tick();
+    /* Only CPU 0 increments the global tick counter and checks timeouts */
+    if (cpu_id() == 0) {
+        tick_count++;
+        wq_tick();
+    }
 
-    /* Rearm timer */
+    /* Set per-CPU reschedule flag */
+    this_cpu()->reschedule_needed = 1;
+
+    /* Rearm this CPU's timer */
     write_sysreg(cntv_tval_el0, timer_interval);
 }
 
@@ -53,9 +56,20 @@ void timer_init(void)
     write_sysreg(cntv_ctl_el0, 1);  /* Enable, unmask */
 
     tick_count = 0;
-    reschedule_needed = 0;
 
     kprintf("[timer] armed, IRQ %d\n", TIMER_IRQ);
+}
+
+void timer_init_secondary(void)
+{
+    /* Each core has its own CNTV timer (PPI 27).
+     * Handler already registered by primary. Just arm and enable. */
+    u64 freq = read_sysreg(cntfrq_el0);
+    u64 interval = freq / 100;
+
+    irq_enable(TIMER_IRQ);
+    write_sysreg(cntv_tval_el0, interval);
+    write_sysreg(cntv_ctl_el0, 1);
 }
 
 u64 timer_get_ticks(void)

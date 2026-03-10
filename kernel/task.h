@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "cap.h"
+#include "vm.h"
 
 #define MAX_TASKS       32
 #define TASK_STACK_SIZE 16384  /* 16 KB */
@@ -26,6 +27,7 @@ struct task {
     char name[32];
     struct task_context ctx;
     u64 stack_base;
+    struct address_space as;  /* per-task page tables */
     int cap_table[MAX_CAPS_PER_TASK];  /* indices into global cap pool */
     int num_caps;
     int wakeup_reason;  /* 0=normal wake, -1=timeout */

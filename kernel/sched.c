@@ -1,35 +1,35 @@
 /*
- * Dragoon Microkernel - Round-Robin Scheduler
+ * Dragoon Microkernel - SMP Round-Robin Scheduler
  *
- * Cooperative scheduling: tasks yield via schedule() or SYS_YIELD.
- * Timer sets reschedule_needed flag but doesn't preempt directly.
+ * Global run queue with spinlock. Each CPU runs its own scheduler loop.
+ * Timer sets per-CPU reschedule_needed flag.
  */
 #include "sched.h"
 #include "task.h"
+#include "spinlock.h"
+#include "percpu.h"
 #include "printf.h"
 #include "types.h"
 
-extern void context_switch(struct task_context *old, struct task_context *new);
-extern volatile int reschedule_needed;
+extern void context_switch(struct task_context *old, struct task_context *new_ctx, u64 ttbr0);
 
-/* Idle context (kernel main's context) */
-static struct task_context idle_ctx;
+static struct spinlock sched_lock = SPINLOCK_INIT;
 static int scheduler_running = 0;
 
 void sched_init(void)
 {
     scheduler_running = 0;
-    kprintf("[sched] scheduler initialized (round-robin)\n");
+    kprintf("[sched] scheduler initialized (round-robin, SMP)\n");
 }
-
-/* Scratch context for dead/exiting tasks (context is saved but discarded) */
-static struct task_context dead_ctx;
 
 void schedule(void)
 {
-    int cur = task_current_id();
+    struct percpu_data *pcpu = this_cpu();
+    int cur = pcpu->current_task_id;
     int next = -1;
     int start = (cur >= 0) ? cur : 0;
+
+    u64 flags = spin_lock_irqsave(&sched_lock);
 
     /* Find next READY task (round-robin) */
     for (int i = 1; i <= MAX_TASKS; i++) {
@@ -51,40 +51,58 @@ void schedule(void)
             old_ctx = &old_task->ctx;
         } else {
             /* Current task is dead, use scratch context */
-            old_ctx = &dead_ctx;
+            old_ctx = &pcpu->dead_ctx;
         }
     } else {
-        old_ctx = &idle_ctx;
+        old_ctx = &pcpu->idle_ctx;
     }
 
     if (next < 0) {
         /* No ready tasks - return to idle */
         if (cur >= 0) {
-            task_set_current(-1);
-            context_switch(old_ctx, &idle_ctx);
+            pcpu->current_task_id = -1;
+            spin_unlock_irqrestore(&sched_lock, flags);
+            context_switch(old_ctx, &pcpu->idle_ctx, 0);
+        } else {
+            spin_unlock_irqrestore(&sched_lock, flags);
         }
         return;
     }
 
-    if (next == cur)
+    if (next == cur) {
+        struct task *t = task_get(cur);
+        if (t) t->state = TASK_RUNNING;
+        spin_unlock_irqrestore(&sched_lock, flags);
         return;
+    }
 
     struct task *next_task = task_get(next);
     next_task->state = TASK_RUNNING;
-    task_set_current(next);
-    context_switch(old_ctx, &next_task->ctx);
+    pcpu->current_task_id = next;
+
+    /* Compute TTBR0 for the new task (0 = no switch, keep current) */
+    u64 ttbr0_val = 0;
+    if (next_task->as.pgd) {
+        ttbr0_val = (u64)next_task->as.pgd | ((u64)next_task->as.asid << 48);
+    }
+
+    /* Release lock BEFORE context_switch — the task is already marked RUNNING
+     * so no other CPU will pick it up */
+    spin_unlock_irqrestore(&sched_lock, flags);
+
+    context_switch(old_ctx, &next_task->ctx, ttbr0_val);
 }
 
 void sched_yield(void)
 {
-    reschedule_needed = 0;
+    this_cpu()->reschedule_needed = 0;
     schedule();
 }
 
 void sched_start(void)
 {
     scheduler_running = 1;
-    kprintf("[sched] starting scheduler\n");
+    kprintf("[sched] CPU %d starting scheduler\n", cpu_id());
 
     /* Run scheduler loop */
     while (1) {

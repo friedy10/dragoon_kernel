@@ -154,12 +154,13 @@ _handler_irq_el1h:
     eret
 
 /*
- * Context switch: context_switch(struct task_context *old, struct task_context *new)
+ * Context switch: context_switch(struct task_context *old, struct task_context *new, u64 ttbr0)
  *   x0 = pointer to old task's context
  *   x1 = pointer to new task's context
+ *   x2 = new TTBR0 value (PGD | ASID<<48), or 0 to skip
  *
- * Saves callee-saved registers to old, loads from new.
- * Returns to new task's saved LR (x30).
+ * Saves callee-saved registers to old, switches TTBR0 if needed,
+ * loads from new. Returns to new task's saved LR (x30).
  */
 .global context_switch
 context_switch:
@@ -172,6 +173,12 @@ context_switch:
     stp     x29, x30, [x0, #80]
     mov     x9, sp
     str     x9, [x0, #96]
+
+    /* Switch TTBR0 if x2 is non-zero */
+    cbz     x2, 1f
+    msr     ttbr0_el1, x2
+    isb
+1:
 
     /* Restore callee-saved regs from new context */
     ldp     x19, x20, [x1, #0]

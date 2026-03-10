@@ -6,6 +6,7 @@
  */
 #include "futex.h"
 #include "waitqueue.h"
+#include "spinlock.h"
 #include "printf.h"
 
 #define FUTEX_MAX 16
@@ -17,6 +18,7 @@ struct futex_slot {
 };
 
 static struct futex_slot ftable[FUTEX_MAX];
+static struct spinlock futex_lock = SPINLOCK_INIT;
 
 void futex_init(void)
 {
@@ -56,53 +58,76 @@ static void maybe_free_slot(int slot)
 
 int futex_wait(u32 *addr, u32 expected)
 {
+    spin_lock(&futex_lock);
+
     /* Check value — if mismatch, don't block */
-    if (*addr != expected)
+    if (*addr != expected) {
+        spin_unlock(&futex_lock);
         return -1;
+    }
 
     int slot = find_slot(addr, 1);
     if (slot < 0) {
+        spin_unlock(&futex_lock);
         kprintf("[futex] no free slots!\n");
         return -1;
     }
 
-    /* Re-check after finding slot (still single-core cooperative, no race) */
+    /* Re-check after finding slot */
     if (*addr != expected) {
         maybe_free_slot(slot);
+        spin_unlock(&futex_lock);
         return -1;
     }
 
+    spin_unlock(&futex_lock);
     wq_wait(&ftable[slot].wq);
+
+    spin_lock(&futex_lock);
     maybe_free_slot(slot);
+    spin_unlock(&futex_lock);
     return 0;
 }
 
 int futex_wait_timeout(u32 *addr, u32 expected, u64 ticks)
 {
-    if (*addr != expected)
+    spin_lock(&futex_lock);
+    if (*addr != expected) {
+        spin_unlock(&futex_lock);
         return -1;
+    }
 
     int slot = find_slot(addr, 1);
     if (slot < 0) {
+        spin_unlock(&futex_lock);
         kprintf("[futex] no free slots!\n");
         return -1;
     }
 
     if (*addr != expected) {
         maybe_free_slot(slot);
+        spin_unlock(&futex_lock);
         return -1;
     }
 
+    spin_unlock(&futex_lock);
     int ret = wq_wait_timeout(&ftable[slot].wq, ticks);
+
+    spin_lock(&futex_lock);
     maybe_free_slot(slot);
+    spin_unlock(&futex_lock);
     return ret;
 }
 
 int futex_wake(u32 *addr, int count)
 {
+    spin_lock(&futex_lock);
     int slot = find_slot(addr, 0);
-    if (slot < 0)
+    if (slot < 0) {
+        spin_unlock(&futex_lock);
         return 0;
+    }
+    spin_unlock(&futex_lock);
 
     int woken = 0;
     while (woken < count && ftable[slot].wq.head >= 0) {
@@ -110,6 +135,8 @@ int futex_wake(u32 *addr, int count)
         woken++;
     }
 
+    spin_lock(&futex_lock);
     maybe_free_slot(slot);
+    spin_unlock(&futex_lock);
     return woken;
 }

@@ -5,6 +5,7 @@ QEMU=/opt/homebrew/bin/qemu-system-aarch64
 exec $QEMU \
     -M virt \
     -cpu cortex-a53 \
+    -smp 4 \
     -m 128M \
     -device ramfb \
     -device virtio-keyboard-device \

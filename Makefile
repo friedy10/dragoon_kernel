@@ -25,7 +25,8 @@ KERNEL_C_SRC = kernel/main.c kernel/uart.c kernel/printf.c kernel/mm.c \
                kernel/syscall.c kernel/irq.c kernel/timer.c \
                kernel/fb.c kernel/font.c kernel/gpu.c kernel/input.c \
                kernel/virtio.c kernel/virtio_input.c kernel/wm.c kernel/gui.c \
-               kernel/waitqueue.c kernel/sleep.c kernel/futex.c
+               kernel/waitqueue.c kernel/sleep.c kernel/futex.c \
+               kernel/vm.c kernel/smp.c
 KERNEL_S_SRC = kernel/boot.S kernel/vectors.S
 
 # Linux compat sources

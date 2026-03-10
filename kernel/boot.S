@@ -4,6 +4,8 @@
  *
  * QEMU loads us at 0x40080000 and enters at EL1 (with -kernel flag)
  * or EL2 (bare metal). We handle both cases.
+ *
+ * Secondary CPUs are booted via PSCI CPU_ON and enter at _secondary_start.
  */
 
 .section .text.boot
@@ -50,7 +52,7 @@ drop_to_el1:
 at_el1:
     /* We are now at EL1 */
 
-    /* Only boot on CPU 0, park others */
+    /* Only boot on CPU 0, park others in holding pen */
     mrs     x0, mpidr_el1
     and     x0, x0, #0xff
     cbnz    x0, halt
@@ -76,3 +78,38 @@ bss_done:
 halt:
     wfe
     b       halt
+
+/*
+ * Secondary CPU entry point.
+ * Called via PSCI CPU_ON. Arrives at EL1 (PSCI handles EL2->EL1).
+ * x0 = context_id = CPU ID (passed by primary via PSCI)
+ */
+.section .text
+.global _secondary_start
+_secondary_start:
+    /* Disable all interrupts */
+    msr     daifset, #0xf
+
+    /* x0 = CPU ID from PSCI context_id.
+     * Load per-CPU stack from secondary_stacks[cpu_id]. */
+    ldr     x1, =secondary_stacks
+    ldr     x1, [x1, x0, lsl #3]   /* x1 = secondary_stacks[cpu_id] */
+    mov     sp, x1
+
+    /* Install vector table */
+    ldr     x2, =exception_vector_table
+    msr     vbar_el1, x2
+    isb
+
+    /* Initialize MMU with same config as primary */
+    /* Save CPU ID across function call */
+    stp     x0, x30, [sp, #-16]!
+    bl      secondary_mmu_init
+    ldp     x0, x30, [sp], #16
+
+    /* Enter C code for secondary CPU init */
+    bl      secondary_main
+
+    /* Should not return */
+1:  wfe
+    b       1b

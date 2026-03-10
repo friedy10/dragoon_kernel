@@ -6,11 +6,17 @@
  */
 #include "task.h"
 #include "mm.h"
+#include "vm.h"
+#include "spinlock.h"
+#include "percpu.h"
 #include "printf.h"
 
 static struct task tasks[MAX_TASKS];
-static int current_task_id = -1;
 static int num_tasks = 0;
+static struct spinlock task_lock __unused = SPINLOCK_INIT;
+
+/* Per-CPU data array */
+struct percpu_data percpu[MAX_CPUS];
 
 /* External: assembly context switch and task trampoline */
 extern void context_switch(struct task_context *old, struct task_context *new);
@@ -19,7 +25,7 @@ extern void task_trampoline(void);
 /* Called by task_trampoline when a task's entry function returns */
 void task_exit_handler(void)
 {
-    int id = current_task_id;
+    int id = this_cpu()->current_task_id;
     kprintf("[task] task %d '%s' exited\n", id, tasks[id].name);
     tasks[id].state = TASK_DEAD;
     num_tasks--;
@@ -39,7 +45,14 @@ void task_init(void)
         tasks[i].stack_base = 0;
     }
     num_tasks = 0;
-    current_task_id = -1;
+
+    /* Initialize per-CPU data */
+    for (int c = 0; c < MAX_CPUS; c++) {
+        percpu[c].cpu_id = c;
+        percpu[c].current_task_id = -1;
+        percpu[c].reschedule_needed = 0;
+    }
+
     kprintf("[task] task subsystem initialized, max tasks: %d\n", MAX_TASKS);
 }
 
@@ -66,16 +79,20 @@ int task_create(const char *name, void (*entry)(void))
         t->name[j] = name[j];
     t->name[j] = '\0';
 
-    /* Allocate stack (4 pages = 16KB) */
-    void *stack = NULL;
-    for (int p = 0; p < (TASK_STACK_SIZE / PAGE_SIZE); p++) {
-        void *page = page_alloc();
-        if (!page) {
-            kprintf("[task] ERROR: out of memory for stack\n");
-            return -1;
-        }
-        if (p == 0)
-            stack = page;
+    /* Create per-task address space */
+    if (vm_create(&t->as) < 0) {
+        kprintf("[task] ERROR: failed to create address space\n");
+        t->state = TASK_DEAD;
+        return -1;
+    }
+
+    /* Allocate stack (4 contiguous pages = 16KB) */
+    void *stack = pages_alloc(TASK_STACK_SIZE / PAGE_SIZE);
+    if (!stack) {
+        kprintf("[task] ERROR: out of memory for stack\n");
+        vm_destroy(&t->as);
+        t->state = TASK_DEAD;
+        return -1;
     }
     t->stack_base = (u64)stack;
 
@@ -124,10 +141,10 @@ void task_destroy(int task_id)
         return;
 
     /* Free stack pages */
-    for (int p = 0; p < (TASK_STACK_SIZE / PAGE_SIZE); p++) {
-        void *page = (void *)(t->stack_base + p * PAGE_SIZE);
-        page_free(page);
-    }
+    pages_free((void *)t->stack_base, TASK_STACK_SIZE / PAGE_SIZE);
+
+    /* Destroy address space */
+    vm_destroy(&t->as);
 
     t->state = TASK_DEAD;
     num_tasks--;
@@ -145,19 +162,20 @@ struct task *task_get(int task_id)
 
 struct task *task_current(void)
 {
-    if (current_task_id < 0)
+    int id = this_cpu()->current_task_id;
+    if (id < 0)
         return NULL;
-    return &tasks[current_task_id];
+    return &tasks[id];
 }
 
 int task_current_id(void)
 {
-    return current_task_id;
+    return this_cpu()->current_task_id;
 }
 
 void task_set_current(int id)
 {
-    current_task_id = id;
+    this_cpu()->current_task_id = id;
 }
 
 int task_count(void)

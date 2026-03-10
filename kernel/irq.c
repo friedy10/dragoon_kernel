@@ -6,6 +6,7 @@
  *   CPU interface: 0x08010000
  */
 #include "irq.h"
+#include "percpu.h"
 #include "printf.h"
 #include "types.h"
 
@@ -37,6 +38,9 @@ static inline u32 gic_read(u64 addr)
 }
 
 #define MAX_IRQ 256
+#define IPI_RESCHEDULE 0  /* SGI 0 = reschedule IPI */
+#define GICD_SGIR (GICD_BASE + 0xF00)
+
 static irq_handler_t irq_handlers[MAX_IRQ];
 
 /* Default handler for unhandled exceptions */
@@ -48,6 +52,20 @@ void exception_handler(void *regs, u64 esr, u64 elr, u64 far)
     kprintf("[EXCEPTION] halting\n");
     while (1)
         __asm__ volatile("wfe");
+}
+
+/* Initialize GIC CPU interface — called on each CPU */
+void gic_cpu_init(void)
+{
+    gic_write(GICC_PMR, 0xFF);
+    gic_write(GICC_CTLR, 1);
+}
+
+/* IPI reschedule handler — just sets per-CPU flag */
+static void ipi_handler(u32 irq)
+{
+    (void)irq;
+    this_cpu()->reschedule_needed = 1;
 }
 
 void irq_init(void)
@@ -84,13 +102,16 @@ void irq_init(void)
     /* Enable distributor */
     gic_write(GICD_CTLR, 1);
 
-    /* CPU interface: enable, set priority mask to allow all */
-    gic_write(GICC_PMR, 0xFF);
-    gic_write(GICC_CTLR, 1);
+    /* CPU interface for CPU 0 */
+    gic_cpu_init();
 
     /* Install vector table */
     extern void vectors_init(void);
     vectors_init();
+
+    /* Register IPI reschedule handler (SGI 0) */
+    irq_register(IPI_RESCHEDULE, ipi_handler);
+    irq_enable(IPI_RESCHEDULE);
 
     /* Enable IRQs (clear DAIF.I) */
     __asm__ volatile("msr daifclr, #2");

@@ -9,6 +9,8 @@
 #include "task.h"
 #include "timer.h"
 #include "sched.h"
+#include "spinlock.h"
+#include "smp.h"
 #include "printf.h"
 
 #define WQ_POOL_SIZE 64
@@ -22,6 +24,7 @@ struct wq_entry {
 };
 
 static struct wq_entry wq_pool[WQ_POOL_SIZE];
+static struct spinlock wq_lock = SPINLOCK_INIT;
 
 void wq_pool_init(void)
 {
@@ -94,8 +97,10 @@ void wq_wait(struct wait_queue *wq)
     int tid = task_current_id();
     if (tid < 0) return;
 
+    u64 flags = spin_lock_irqsave(&wq_lock);
     int idx = pool_alloc();
     if (idx < 0) {
+        spin_unlock_irqrestore(&wq_lock, flags);
         kprintf("[wq] pool exhausted!\n");
         return;
     }
@@ -110,6 +115,7 @@ void wq_wait(struct wait_queue *wq)
         t->wakeup_reason = 0;
         t->state = TASK_BLOCKED;
     }
+    spin_unlock_irqrestore(&wq_lock, flags);
 
     schedule();
 }
@@ -119,8 +125,10 @@ int wq_wait_timeout(struct wait_queue *wq, u64 ticks)
     int tid = task_current_id();
     if (tid < 0) return -1;
 
+    u64 flags = spin_lock_irqsave(&wq_lock);
     int idx = pool_alloc();
     if (idx < 0) {
+        spin_unlock_irqrestore(&wq_lock, flags);
         kprintf("[wq] pool exhausted!\n");
         return -1;
     }
@@ -135,6 +143,7 @@ int wq_wait_timeout(struct wait_queue *wq, u64 ticks)
         t->wakeup_reason = 0;
         t->state = TASK_BLOCKED;
     }
+    spin_unlock_irqrestore(&wq_lock, flags);
 
     schedule();
 
@@ -146,22 +155,34 @@ int wq_wait_timeout(struct wait_queue *wq, u64 ticks)
 
 void wq_wake_one(struct wait_queue *wq)
 {
-    if (wq->head < 0) return;
+    u64 flags = spin_lock_irqsave(&wq_lock);
+    if (wq->head < 0) {
+        spin_unlock_irqrestore(&wq_lock, flags);
+        return;
+    }
 
     int idx = wq->head;
     wq->head = wq_pool[idx].next;
 
     struct task *t = task_get(wq_pool[idx].task_id);
+    int woke = 0;
     if (t && t->state == TASK_BLOCKED) {
         t->wakeup_reason = 0;
         t->state = TASK_READY;
+        woke = 1;
     }
 
     pool_free(idx);
+    spin_unlock_irqrestore(&wq_lock, flags);
+
+    if (woke)
+        smp_send_reschedule();
 }
 
 void wq_wake_all(struct wait_queue *wq)
 {
+    int woke = 0;
+    u64 flags = spin_lock_irqsave(&wq_lock);
     while (wq->head >= 0) {
         int idx = wq->head;
         wq->head = wq_pool[idx].next;
@@ -170,16 +191,22 @@ void wq_wake_all(struct wait_queue *wq)
         if (t && t->state == TASK_BLOCKED) {
             t->wakeup_reason = 0;
             t->state = TASK_READY;
+            woke = 1;
         }
 
         pool_free(idx);
     }
+    spin_unlock_irqrestore(&wq_lock, flags);
+
+    if (woke)
+        smp_send_reschedule();
 }
 
 void wq_tick(void)
 {
     u64 now = timer_get_ticks();
 
+    u64 flags = spin_lock_irqsave(&wq_lock);
     for (int i = 0; i < WQ_POOL_SIZE; i++) {
         if (!wq_pool[i].in_use) continue;
         if (wq_pool[i].timeout_tick == 0) continue;
@@ -198,4 +225,5 @@ void wq_tick(void)
 
         pool_free(i);
     }
+    spin_unlock_irqrestore(&wq_lock, flags);
 }

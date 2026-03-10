@@ -6,6 +6,7 @@
  * Identity maps kernel text/data and device MMIO.
  */
 #include "mm.h"
+#include "spinlock.h"
 #include "printf.h"
 
 /* ---- Page Allocator ---- */
@@ -17,6 +18,7 @@
 static u64 page_bitmap[BITMAP_SIZE];
 static u64 total_pages;
 static u64 used_pages;
+static struct spinlock mm_lock = SPINLOCK_INIT;
 
 /* Kernel end symbol from linker script */
 extern char __kernel_end[];
@@ -61,10 +63,12 @@ void mm_init(void)
 
 void *page_alloc(void)
 {
+    u64 flags = spin_lock_irqsave(&mm_lock);
     for (u64 i = 0; i < MAX_PAGES; i++) {
         if (!bitmap_test(i)) {
             bitmap_set(i);
             used_pages++;
+            spin_unlock_irqrestore(&mm_lock, flags);
             u64 addr = RAM_BASE + i * PAGE_SIZE;
             /* Zero the page */
             u64 *p = (u64 *)addr;
@@ -73,6 +77,7 @@ void *page_alloc(void)
             return (void *)addr;
         }
     }
+    spin_unlock_irqrestore(&mm_lock, flags);
     return NULL;
 }
 
@@ -84,6 +89,7 @@ void *pages_alloc(u64 n)
     u64 run_start = 0;
     u64 run_len = 0;
 
+    u64 flags = spin_lock_irqsave(&mm_lock);
     for (u64 i = 0; i < MAX_PAGES; i++) {
         if (!bitmap_test(i)) {
             if (run_len == 0)
@@ -94,6 +100,7 @@ void *pages_alloc(u64 n)
                     bitmap_set(j);
                     used_pages++;
                 }
+                spin_unlock_irqrestore(&mm_lock, flags);
                 u64 addr = RAM_BASE + run_start * PAGE_SIZE;
                 u64 *p = (u64 *)addr;
                 for (u64 j = 0; j < (n * PAGE_SIZE) / sizeof(u64); j++)
@@ -104,6 +111,7 @@ void *pages_alloc(u64 n)
             run_len = 0;
         }
     }
+    spin_unlock_irqrestore(&mm_lock, flags);
     return NULL;
 }
 
@@ -113,15 +121,18 @@ void page_free(void *addr)
     if (a < RAM_BASE || a >= RAM_BASE + RAM_SIZE)
         return;
     u64 idx = (a - RAM_BASE) / PAGE_SIZE;
+    u64 flags = spin_lock_irqsave(&mm_lock);
     if (bitmap_test(idx)) {
         bitmap_clear(idx);
         used_pages--;
     }
+    spin_unlock_irqrestore(&mm_lock, flags);
 }
 
 void pages_free(void *addr, u64 n)
 {
     u64 a = (u64)addr;
+    u64 flags = spin_lock_irqsave(&mm_lock);
     for (u64 i = 0; i < n; i++) {
         u64 page_addr = a + i * PAGE_SIZE;
         if (page_addr >= RAM_BASE && page_addr < RAM_BASE + RAM_SIZE) {
@@ -132,6 +143,7 @@ void pages_free(void *addr, u64 n)
             }
         }
     }
+    spin_unlock_irqrestore(&mm_lock, flags);
 }
 
 u64 mm_get_free_pages(void)
@@ -176,8 +188,9 @@ u64 mm_get_total_pages(void)
 /* Device memory block attributes */
 #define BLOCK_DEVICE (PTE_VALID | PTE_BLOCK | PTE_AF | PTE_SH_OUTER | PTE_ATTR(MAIR_IDX_DEVICE))
 
-/* L0 table (PGD) - statically allocated, 4KB aligned */
-static u64 pgd_table[512] __aligned(4096);
+/* L0 table (PGD) - statically allocated, 4KB aligned.
+ * Non-static: shared with vm.c for per-task address space creation. */
+u64 pgd_table[512] __aligned(4096);
 /* L1 table for the first 512GB */
 static u64 pud_table[512] __aligned(4096);
 /* L2 table for 0x00000000 - 0x3FFFFFFF (first 1GB, for device MMIO) */
@@ -273,9 +286,87 @@ void mm_enable_mmu(void)
     kprintf("[mm] MMU enabled\n");
 }
 
-void mm_map_page(u64 vaddr, u64 paddr, u64 flags)
+void mm_map_page(u64 *pgd, u64 vaddr, u64 paddr, u64 flags)
 {
-    (void)vaddr; (void)paddr; (void)flags;
+    int l0_idx = (vaddr >> 39) & 0x1FF;
+    int l1_idx = (vaddr >> 30) & 0x1FF;
+    int l2_idx = (vaddr >> 21) & 0x1FF;
+    int l3_idx = (vaddr >> 12) & 0x1FF;
+
+    /* Walk/create L1 table */
+    u64 *l1;
+    if (!(pgd[l0_idx] & PTE_VALID)) {
+        l1 = (u64 *)page_alloc();
+        if (!l1) return;
+        pgd[l0_idx] = (u64)l1 | PTE_VALID | PTE_TABLE;
+    } else {
+        l1 = (u64 *)(pgd[l0_idx] & ~0xFFFULL);
+    }
+
+    /* Walk/create L2 table */
+    u64 *l2;
+    if (!(l1[l1_idx] & PTE_VALID)) {
+        l2 = (u64 *)page_alloc();
+        if (!l2) return;
+        l1[l1_idx] = (u64)l2 | PTE_VALID | PTE_TABLE;
+    } else {
+        if (!(l1[l1_idx] & PTE_TABLE)) return;  /* block descriptor, can't split */
+        l2 = (u64 *)(l1[l1_idx] & ~0xFFFULL);
+    }
+
+    /* Walk/create L3 table */
+    u64 *l3;
+    if (!(l2[l2_idx] & PTE_VALID)) {
+        l3 = (u64 *)page_alloc();
+        if (!l3) return;
+        l2[l2_idx] = (u64)l3 | PTE_VALID | PTE_TABLE;
+    } else {
+        if (!(l2[l2_idx] & PTE_TABLE)) return;  /* 2MB block, can't split */
+        l3 = (u64 *)(l2[l2_idx] & ~0xFFFULL);
+    }
+
+    /* Map the 4KB page at L3 */
+    l3[l3_idx] = (paddr & ~0xFFFULL) | flags;
+}
+
+void secondary_mmu_init(void)
+{
+    /* Set MAIR (same as primary) */
+    u64 mair = (0xFFULL << (MAIR_IDX_NORMAL * 8)) |
+               (0x00ULL << (MAIR_IDX_DEVICE * 8));
+    write_sysreg(mair_el1, mair);
+
+    /* Set TCR (same as primary) */
+    u64 tcr = (16ULL << 0)  |  /* T0SZ = 16 */
+              (1ULL  << 8)  |  /* IRGN0 = write-back */
+              (1ULL  << 10) |  /* ORGN0 = write-back */
+              (3ULL  << 12) |  /* SH0 = inner shareable */
+              (0ULL  << 14) |  /* TG0 = 4KB */
+              (16ULL << 16) |  /* T1SZ = 16 */
+              (1ULL  << 24) |  /* IRGN1 */
+              (1ULL  << 26) |  /* ORGN1 */
+              (3ULL  << 28) |  /* SH1 */
+              (2ULL  << 30) |  /* TG1 = 4KB */
+              (1ULL  << 23);   /* EPD1 = disable TTBR1 walks */
+    write_sysreg(tcr_el1, tcr);
+
+    /* Set TTBR0 to kernel page tables */
+    write_sysreg(ttbr0_el1, (u64)pgd_table);
+
+    /* TLB invalidation */
+    isb();
+    __asm__ volatile("tlbi vmalle1is");
+    dsb();
+    isb();
+
+    /* Enable MMU + caches */
+    u64 sctlr = read_sysreg(sctlr_el1);
+    sctlr |= (1ULL << 0);   /* M: enable MMU */
+    sctlr |= (1ULL << 2);   /* C: data cache enable */
+    sctlr |= (1ULL << 12);  /* I: instruction cache enable */
+    sctlr &= ~(1ULL << 19); /* WXN: disable write-implies-XN */
+    write_sysreg(sctlr_el1, sctlr);
+    isb();
 }
 
 /* Compiler may emit calls to these for struct copies / array zeroing */

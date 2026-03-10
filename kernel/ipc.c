@@ -6,6 +6,7 @@
  */
 #include "ipc.h"
 #include "task.h"
+#include "spinlock.h"
 #include "printf.h"
 
 struct ipc_endpoint {
@@ -17,6 +18,7 @@ struct ipc_endpoint {
 };
 
 static struct ipc_endpoint endpoints[MAX_ENDPOINTS];
+static struct spinlock ipc_lock = SPINLOCK_INIT;
 
 void ipc_init(void)
 {
@@ -31,15 +33,18 @@ void ipc_init(void)
 
 int ipc_endpoint_create(void)
 {
+    spin_lock(&ipc_lock);
     for (int i = 0; i < MAX_ENDPOINTS; i++) {
         if (!endpoints[i].active) {
             endpoints[i].active = 1;
             endpoints[i].sender_task = -1;
             endpoints[i].receiver_task = -1;
             endpoints[i].has_pending = 0;
+            spin_unlock(&ipc_lock);
             return i;
         }
     }
+    spin_unlock(&ipc_lock);
     return -1;
 }
 

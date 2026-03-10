@@ -6,10 +6,12 @@
  * Tasks hold indices into this pool via their cap_table.
  */
 #include "cap.h"
+#include "spinlock.h"
 #include "printf.h"
 
 static struct capability cap_pool[CAP_POOL_SIZE];
 static int cap_pool_used[CAP_POOL_SIZE];
+static struct spinlock cap_lock = SPINLOCK_INIT;
 
 void cap_init(void)
 {
@@ -23,14 +25,17 @@ void cap_init(void)
 
 int cap_alloc(struct capability *cap_out)
 {
+    spin_lock(&cap_lock);
     for (int i = 0; i < CAP_POOL_SIZE; i++) {
         if (!cap_pool_used[i]) {
             cap_pool_used[i] = 1;
             cap_pool[i] = *cap_out;
             cap_pool[i].refcount = 1;
+            spin_unlock(&cap_lock);
             return i;
         }
     }
+    spin_unlock(&cap_lock);
     kprintf("[cap] ERROR: pool exhausted\n");
     return -1;
 }
@@ -39,14 +44,18 @@ int cap_destroy(int cap_id)
 {
     if (cap_id < 0 || cap_id >= CAP_POOL_SIZE)
         return -1;
-    if (!cap_pool_used[cap_id])
+    spin_lock(&cap_lock);
+    if (!cap_pool_used[cap_id]) {
+        spin_unlock(&cap_lock);
         return -1;
+    }
 
     cap_pool[cap_id].refcount--;
     if (cap_pool[cap_id].refcount == 0) {
         cap_pool[cap_id].type = CAP_NONE;
         cap_pool_used[cap_id] = 0;
     }
+    spin_unlock(&cap_lock);
     return 0;
 }
 

@@ -10,6 +10,7 @@
 typedef void (*irq_handler_t)(u32 irq);
 
 void irq_init(void);
+void gic_cpu_init(void);  /* per-CPU GIC interface setup */
 void irq_register(u32 irq, irq_handler_t handler);
 void irq_enable(u32 irq);
 void irq_disable(u32 irq);
