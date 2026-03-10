@@ -6,6 +6,9 @@ exec $QEMU \
     -M virt \
     -cpu cortex-a53 \
     -m 128M \
-    -nographic \
+    -device ramfb \
+    -device virtio-keyboard-device \
+    -device virtio-tablet-device \
+    -serial stdio \
     -kernel dragoon.elf \
     "$@"

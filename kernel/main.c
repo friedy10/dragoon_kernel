@@ -12,6 +12,10 @@
 #include "syscall.h"
 #include "irq.h"
 #include "timer.h"
+#include "waitqueue.h"
+#include "sleep.h"
+#include "futex.h"
+#include "gui.h"
 
 /* Linux compat server entry point */
 extern void linux_compat_server(void);
@@ -79,11 +83,19 @@ void kernel_main(void)
     ipc_init();
     syscall_init();
 
+    /* Wait queues, sleep, futex */
+    wq_pool_init();
+    sleep_init();
+    futex_init();
+
     /* Create the Linux compatibility server task */
     task_create("linux-compat", linux_compat_server);
 
     /* Create the init/demo task */
     task_create("init", init_task);
+
+    /* Create the GUI task */
+    task_create("gui", gui_main);
 
     kprintf("\n[main] kernel initialization complete\n");
     kprintf("[main] starting scheduler...\n\n");

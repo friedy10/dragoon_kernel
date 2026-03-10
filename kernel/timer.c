@@ -8,6 +8,7 @@
 #include "irq.h"
 #include "printf.h"
 #include "types.h"
+#include "waitqueue.h"
 
 /* Virtual timer IRQ (PPI 27, but GIC PPI numbering = 16 + offset) */
 #define TIMER_IRQ 27
@@ -24,6 +25,9 @@ static void timer_handler(u32 irq)
     (void)irq;
     tick_count++;
     reschedule_needed = 1;
+
+    /* Check wait queue timeouts */
+    wq_tick();
 
     /* Rearm timer */
     write_sysreg(cntv_tval_el0, timer_interval);

@@ -16,7 +16,9 @@
 
 void mm_init(void);
 void *page_alloc(void);
+void *pages_alloc(u64 n);
 void page_free(void *addr);
+void pages_free(void *addr, u64 n);
 u64 mm_get_free_pages(void);
 u64 mm_get_total_pages(void);
 

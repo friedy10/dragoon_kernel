@@ -28,6 +28,7 @@ struct task {
     u64 stack_base;
     int cap_table[MAX_CAPS_PER_TASK];  /* indices into global cap pool */
     int num_caps;
+    int wakeup_reason;  /* 0=normal wake, -1=timeout */
 };
 
 void task_init(void);

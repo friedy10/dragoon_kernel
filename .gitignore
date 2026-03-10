@@ -1,3 +1,5 @@
 *.o
 *.elf
 *.bin
+*.ppm
+.DS_Store

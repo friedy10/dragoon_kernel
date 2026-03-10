@@ -76,6 +76,37 @@ void *page_alloc(void)
     return NULL;
 }
 
+void *pages_alloc(u64 n)
+{
+    if (n == 0 || n > MAX_PAGES)
+        return NULL;
+
+    u64 run_start = 0;
+    u64 run_len = 0;
+
+    for (u64 i = 0; i < MAX_PAGES; i++) {
+        if (!bitmap_test(i)) {
+            if (run_len == 0)
+                run_start = i;
+            run_len++;
+            if (run_len == n) {
+                for (u64 j = run_start; j < run_start + n; j++) {
+                    bitmap_set(j);
+                    used_pages++;
+                }
+                u64 addr = RAM_BASE + run_start * PAGE_SIZE;
+                u64 *p = (u64 *)addr;
+                for (u64 j = 0; j < (n * PAGE_SIZE) / sizeof(u64); j++)
+                    p[j] = 0;
+                return (void *)addr;
+            }
+        } else {
+            run_len = 0;
+        }
+    }
+    return NULL;
+}
+
 void page_free(void *addr)
 {
     u64 a = (u64)addr;
@@ -85,6 +116,21 @@ void page_free(void *addr)
     if (bitmap_test(idx)) {
         bitmap_clear(idx);
         used_pages--;
+    }
+}
+
+void pages_free(void *addr, u64 n)
+{
+    u64 a = (u64)addr;
+    for (u64 i = 0; i < n; i++) {
+        u64 page_addr = a + i * PAGE_SIZE;
+        if (page_addr >= RAM_BASE && page_addr < RAM_BASE + RAM_SIZE) {
+            u64 idx = (page_addr - RAM_BASE) / PAGE_SIZE;
+            if (bitmap_test(idx)) {
+                bitmap_clear(idx);
+                used_pages--;
+            }
+        }
     }
 }
 
@@ -160,7 +206,7 @@ void mm_create_page_tables(void)
 
     /* Map device MMIO region: 0x08000000 - 0x0A000000 with 2MB blocks */
     /* 0x08000000 / 2MB = index 64, 0x0A000000 / 2MB = index 80 */
-    for (int i = 64; i < 80; i++) {
+    for (int i = 64; i < 82; i++) {
         u64 paddr = (u64)i * 0x200000ULL;
         pmd_table_dev[i] = paddr | BLOCK_DEVICE;
     }
@@ -229,6 +275,36 @@ void mm_enable_mmu(void)
 
 void mm_map_page(u64 vaddr, u64 paddr, u64 flags)
 {
-    /* Not needed for identity mapping, but provided for future use */
     (void)vaddr; (void)paddr; (void)flags;
+}
+
+/* Compiler may emit calls to these for struct copies / array zeroing */
+void *memcpy(void *dest, const void *src, u64 n)
+{
+    u8 *d = (u8 *)dest;
+    const u8 *s = (const u8 *)src;
+    while (n--)
+        *d++ = *s++;
+    return dest;
+}
+
+void *memset(void *s, int c, u64 n)
+{
+    u8 *p = (u8 *)s;
+    while (n--)
+        *p++ = (u8)c;
+    return s;
+}
+
+int memcmp(const void *s1, const void *s2, u64 n)
+{
+    const u8 *a = (const u8 *)s1;
+    const u8 *b = (const u8 *)s2;
+    while (n--) {
+        if (*a != *b)
+            return *a - *b;
+        a++;
+        b++;
+    }
+    return 0;
 }
